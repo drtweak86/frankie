@@ -1,0 +1,2 @@
+root:x:0:0:root:/root:/bin/sh
+frankie:x:1000:1000:Frankenpi User:/home/frankie:/bin/sh
