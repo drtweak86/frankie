@@ -2,65 +2,48 @@ name: Yocto build (Poky + meta-raspberrypi)
 
 on:
   push:
-    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    env:
-      BB_NUMBER_THREADS: "2"
-      PARALLEL_MAKE: "-j 2"
-      IMAGE_NAME: "core-image-base"
-      MACHINE: "raspberrypi4-64"
-      WORK_DIR: "${{ github.workspace }}/work"
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+    - name: Checkout
+      uses: actions/checkout@v4
 
-      - name: Install host packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git python3 python3-pip gawk wget diffstat unzip texinfo \
-            build-essential chrpath socat cpio python3-pexpect xz-utils debianutils \
-            iputils-ping libsdl1.2-dev xterm
+    - name: Install prerequisites
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git python3 python3-pip gawk wget diffstat unzip texinfo \
+          build-essential chrpath socat cpio python3-pexpect xz-utils debianutils \
+          iputils-ping libsdl1.2-dev xterm
 
-      - name: Prepare workspace
-        run: |
-          mkdir -p "${WORK_DIR}"
+    - name: Prepare workspace
+      run: |
+        RUN_DIR="$GITHUB_WORKSPACE/work"
+        mkdir -p "$RUN_DIR"
+        echo "WORKDIR=$RUN_DIR" > "$GITHUB_WORKSPACE/.frankenpi_env"
 
-      - name: Clone poky and layers
-        run: |
-          cd "${WORK_DIR}"
-          git clone --depth 1 https://git.yoctoproject.org/git/poky poky
-          git clone --depth 1 https://github.com/agherzan/meta-raspberrypi.git poky/meta-raspberrypi
-          git clone --depth 1 https://github.com/openembedded/meta-openembedded.git poky/meta-openembedded
+    - name: Clone poky and layers
+      run: |
+        RUN_DIR="$GITHUB_WORKSPACE/work"
+        cd "$RUN_DIR"
+        git clone --depth 1 https://git.yoctoproject.org/git/poky poky
+        git clone --depth 1 https://github.com/agherzan/meta-raspberrypi.git poky/meta-raspberrypi
+        git clone --depth 1 https://github.com/openembedded/meta-openembedded.git poky/meta-openembedded
 
-      - name: Copy meta-frankenpi into workspace
-        run: |
-          cd "${WORK_DIR}/poky"
-          mkdir -p ../meta-frankenpi
-          cp -a "${{ github.workspace }}/meta-frankenpi" ../meta-frankenpi
+    - name: Copy meta-frankenpi
+      run: |
+        RUN_DIR="$GITHUB_WORKSPACE/work"
+        mkdir -p "$RUN_DIR/meta-frankenpi"
+        cp -a "$GITHUB_WORKSPACE/meta-frankenpi" "$RUN_DIR/"
 
-      - name: Initialize build environment
-        run: |
-          cd "${WORK_DIR}/poky"
-          source oe-init-build-env build
-
-      - name: Add layers
-        run: |
-          cd "${WORK_DIR}/poky/build"
-          bitbake-layers add-layer ../meta-openembedded/meta-oe
-          bitbake-layers add-layer ../meta-raspberrypi
-          bitbake-layers add-layer ../meta-frankenpi
-
-      - name: Generate local.conf
-        run: |
-          cd "${WORK_DIR}/poky/build"
-          cat > conf/local.conf <<'LOCAL_EOF'
+    - name: Create local.conf
+      run: |
+        RUN_DIR="$GITHUB_WORKSPACE/work/poky/build"
+        mkdir -p "$RUN_DIR/conf"
+        cat > "$RUN_DIR/conf/local.conf" <<'LOCAL'
 MACHINE ?= "raspberrypi4-64"
 DISTRO_FEATURES_append = " wifi bluetooth"
 IMAGE_INSTALL_append = " openssh sudo"
@@ -70,43 +53,39 @@ PARALLEL_MAKE ?= "-j 2"
 DL_DIR = "${GITHUB_WORKSPACE}/dl"
 SSTATE_DIR = "${GITHUB_WORKSPACE}/sstate-cache"
 TMPDIR = "${GITHUB_WORKSPACE}/tmp"
-LOCAL_EOF
+LOCAL
 
-      - name: Ensure cache dirs
-        run: |
-          mkdir -p dl sstate-cache tmp
-
-      - name: Restore sstate/dl cache (best-effort)
-        uses: actions/cache@v4
-        with:
-          path: |
-            dl
-            sstate-cache
-          key: yocto-dl-${{ runner.os }}-${{ github.ref }}
-
-      - name: Patch shadow.frankenpi with hashed root password (if secret set)
-        if: ${{ secrets.FRANKENPI_ROOT_PW }}
-        run: |
-          cd "${WORK_DIR}/poky"
+    - name: Patch shadow if secret present
+      run: |
+        RUN_DIR="$GITHUB_WORKSPACE/work/poky"
+        if [ -n "${{ secrets.FRANKENPI_ROOT_PW }}" ]; then
           ROOTPW="${{ secrets.FRANKENPI_ROOT_PW }}"
           HASH=$(python3 -c "import crypt,os; print(crypt.crypt(os.environ['ROOTPW'], crypt.mksalt(crypt.METHOD_SHA512)))")
-          sed -i "s#<HASH_GOES_HERE>#${HASH}#g" ../meta-frankenpi/recipes-core/frankenpi-users/files/shadow.frankenpi
+          sed -i "s#<HASH_GOES_HERE>#${HASH}#g" "$RUN_DIR/../meta-frankenpi/recipes-core/frankenpi-users/files/shadow.frankenpi" || true
+        else
+          echo "No FRANKENPI_ROOT_PW secret set; skipping shadow patch"
+        fi
 
-      - name: Install frankie pubkey (if provided)
-        if: ${{ secrets.FRANKIE_PUBKEY }}
-        run: |
-          mkdir -p "${WORK_DIR}/poky/meta-frankenpi/recipes-core/frankenpi-users/files"
-          echo "${{ secrets.FRANKIE_PUBKEY }}" > "${WORK_DIR}/poky/meta-frankenpi/recipes-core/frankenpi-users/files/frankie_authorized_keys"
+    - name: Add frankie pubkey if provided
+      run: |
+        RUN_DIR="$GITHUB_WORKSPACE/work/poky"
+        if [ -n "${{ secrets.FRANKIE_PUBKEY }}" ]; then
+          mkdir -p "$RUN_DIR/../meta-frankenpi/recipes-core/frankenpi-users/files"
+          echo "${{ secrets.FRANKIE_PUBKEY }}" > "$RUN_DIR/../meta-frankenpi/recipes-core/frankenpi-users/files/frankie_authorized_keys"
+        else
+          echo "No FRANKIE_PUBKEY secret set; skipping pubkey install"
+        fi
 
-      - name: Build image (bitbake)
-        run: |
-          cd "${WORK_DIR}/poky/build"
-          source ../oe-init-build-env build >/dev/null
-          bitbake ${IMAGE_NAME}
+    - name: Bootstrapping and build
+      run: |
+        cd "$GITHUB_WORKSPACE/work/poky"
+        source oe-init-build-env build
+        cd build
+        bitbake core-image-base
 
-      - name: Upload image artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: yocto-image
-          path: "${WORK_DIR}/poky/build/tmp/deploy/images/${MACHINE}/*.sdcard"
-          if-no-files-found: error
+    - name: Upload image artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: yocto-image
+        path: work/poky/build/tmp/deploy/images/raspberrypi4-64/*.sdcard
+        if-no-files-found: error
