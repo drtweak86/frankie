@@ -7,12 +7,12 @@ on:
 
 jobs:
   build:
-    # Use a high-spec runner as Yocto is resource intensive
+    # Use the latest stable Ubuntu runner
     runs-on: ubuntu-22.04
     
     env:
       MACHINE: "raspberrypi4-64"
-      IMAGE_NAME: "core-image-minimal" # Using minimal for faster build time
+      IMAGE_NAME: "core-image-base"
     
     # Set permissions for GitHub Actions to clone the repo
     permissions:
@@ -23,7 +23,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
-        submodules: recursive # Crucial for layers cloned as submodules
+        submodules: recursive
 
     - name: Install Yocto host packages
       run: |
@@ -40,24 +40,21 @@ jobs:
         # Pass environment setup to subsequent steps
         echo "WORKDIR=$GITHUB_WORKSPACE/work" >> $GITHUB_ENV
 
-    - name: Clone poky and layers (Full clone)
+    - name: Clone poky and layers (Full clone for stability)
       run: |
         cd work
-        # Removed --depth 1 for stability
         git clone https://git.yoctoproject.org/git/poky poky
         git clone https://github.com/agherzan/meta-raspberrypi.git poky/meta-raspberrypi
         git clone https://github.com/openembedded/meta-openembedded.git poky/meta-openembedded
 
     - name: Copy meta-frankenpi layer
       run: |
-        cd work
         # Assumes meta-frankenpi is at the root of your repo
-        cp -a $GITHUB_WORKSPACE/meta-frankenpi poky/
+        cp -a $GITHUB_WORKSPACE/meta-frankenpi work/poky/
 
     - name: Initialize build environment
       run: |
         cd work/poky
-        # Initializes the 'build' directory
         source oe-init-build-env build
 
     - name: Add Yocto layers
@@ -77,7 +74,8 @@ jobs:
 MACHINE ?= "raspberrypi4-64"
 # CRUCIAL FIX: Append 'kodi' to the image installation list
 IMAGE_INSTALL_append = " openssh sudo kodi"
-# Using 4 threads for faster compilation on a 2-core runner with good I/O
+IMAGE_FSTYPES = "sdcard"
+# Set PARALLEL MAKE options for better performance
 BB_NUMBER_THREADS ?= "4"
 PARALLEL_MAKE ?= "-j 4"
 # Standard caching setup
@@ -92,26 +90,26 @@ EOF
         path: |
           work/poky/dl
           work/poky/sstate-cache
-        # Use only ref for key to share cache across runs on the same branch
+        # Use ref key to share cache across runs on the same branch
         key: yocto-cache-${{ github.ref }}
         restore-keys: |
           yocto-cache-
 
-    # NOTE: Password/SSH key steps left as you provided them
     - name: Patch shadow.frankenpi (root password)
-      if: ${{ secrets.FRANKENPI_ROOT_PW }}
+      # Robust syntax check for the secret
+      if: ${{ secrets.FRANKENPI_ROOT_PW != '' }} 
       run: |
+        # Use the secret value directly as the input for the script
         PW="${{ secrets.FRANKENPI_ROOT_PW }}"
-        HASH=$(python3 - <<PY
-import crypt, os
-pw = os.environ["PW"]
-print(crypt.crypt(pw, crypt.mksalt(crypt.METHOD_SHA512)))
-PY
-)
+        
+        # Calculate the SHA512 hash
+        HASH=$(python3 -c "import crypt, os; print(crypt.crypt(os.environ['PW'], crypt.mksalt(crypt.METHOD_SHA512)))")
+        
+        # Navigate to the correct directory and replace the placeholder
         sed -i "s#<HASH_GOES_HERE>#${HASH}#g" work/poky/meta-frankenpi/recipes-core/frankenpi-users/files/shadow.frankenpi
 
     - name: Inject Frankie pubkey (optional)
-      if: ${{ secrets.FRANKIE_PUBKEY }}
+      if: ${{ secrets.FRANKIE_PUBKEY != '' }}
       run: |
         mkdir -p work/poky/meta-frankenpi/recipes-core/frankenpi-users/files
         echo "${{ secrets.FRANKIE_PUBKEY }}" \
@@ -121,7 +119,7 @@ PY
       run: |
         cd work/poky
         source oe-init-build-env build >/dev/null
-        # Switched to minimal base image for speed, but you can change back if needed
+        # This will now build core-image-base, which includes Kodi
         bitbake core-image-base 
 
     - name: Upload image artifact
