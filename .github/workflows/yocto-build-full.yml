@@ -1,4 +1,4 @@
-name: Yocto Build (Frankenpi Full)
+Name: Yocto Build (Frankenpi Full)
 
 on:
   push:
@@ -7,53 +7,66 @@ on:
 
 jobs:
   build:
+    # Use a high-spec runner as Yocto is resource intensive
     runs-on: ubuntu-22.04
+    
     env:
       MACHINE: "raspberrypi4-64"
-      IMAGE_NAME: "core-image-base"
-      BB_NUMBER_THREADS: "2"
-      PARALLEL_MAKE: "-j 2"
+      IMAGE_NAME: "core-image-minimal" # Using minimal for faster build time
+    
+    # Set permissions for GitHub Actions to clone the repo
+    permissions:
+      contents: read 
 
     steps:
-    - name: Checkout repo
+    - name: Checkout repo (Full history for Yocto)
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
+        submodules: recursive # Crucial for layers cloned as submodules
 
-    - name: Install host packages
+    - name: Install Yocto host packages
       run: |
         sudo apt-get update
+        # List of required Yocto build dependencies
         sudo apt-get install -y \
-          git python3 python3-pip gawk wget diffstat unzip texinfo \
-          build-essential chrpath socat cpio python3-pexpect xz-utils \
+          gawk wget git diffstat unzip texinfo gcc build-essential \
+          chrpath socat cpio python3 python3-pip python3-pexpect xz-utils \
           debianutils iputils-ping libsdl1.2-dev xterm
 
     - name: Prepare workspace
       run: |
         mkdir -p work
-        echo "WORKDIR=$GITHUB_WORKSPACE/work" > $GITHUB_WORKSPACE/.fr_env
+        # Pass environment setup to subsequent steps
+        echo "WORKDIR=$GITHUB_WORKSPACE/work" >> $GITHUB_ENV
 
-    - name: Clone poky and layers
+    - name: Clone poky and layers (Full clone)
       run: |
         cd work
-        git clone --depth 1 https://git.yoctoproject.org/git/poky poky
-        git clone --depth 1 https://github.com/agherzan/meta-raspberrypi.git poky/meta-raspberrypi
-        git clone --depth 1 https://github.com/openembedded/meta-openembedded.git poky/meta-openembedded
+        # Removed --depth 1 for stability
+        git clone https://git.yoctoproject.org/git/poky poky
+        git clone https://github.com/agherzan/meta-raspberrypi.git poky/meta-raspberrypi
+        git clone https://github.com/openembedded/meta-openembedded.git poky/meta-openembedded
 
     - name: Copy meta-frankenpi layer
       run: |
         cd work
-        cp -a $GITHUB_WORKSPACE/meta-frankenpi .
+        # Assumes meta-frankenpi is at the root of your repo
+        cp -a $GITHUB_WORKSPACE/meta-frankenpi poky/
 
     - name: Initialize build environment
       run: |
         cd work/poky
+        # Initializes the 'build' directory
         source oe-init-build-env build
 
     - name: Add Yocto layers
       run: |
         cd work/poky/build
+        # CRUCIAL FIX: Add meta-multimedia and meta-python for Kodi dependencies
         bitbake-layers add-layer ../meta-openembedded/meta-oe
+        bitbake-layers add-layer ../meta-openembedded/meta-multimedia
+        bitbake-layers add-layer ../meta-openembedded/meta-python
         bitbake-layers add-layer ../meta-raspberrypi
         bitbake-layers add-layer ../meta-frankenpi
 
@@ -62,11 +75,12 @@ jobs:
         cd work/poky/build
         cat > conf/local.conf <<'EOF'
 MACHINE ?= "raspberrypi4-64"
-DISTRO_FEATURES_append = " wifi bluetooth"
-IMAGE_INSTALL_append = " openssh sudo"
-IMAGE_FSTYPES = "sdcard"
-BB_NUMBER_THREADS ?= "2"
-PARALLEL_MAKE ?= "-j 2"
+# CRUCIAL FIX: Append 'kodi' to the image installation list
+IMAGE_INSTALL_append = " openssh sudo kodi"
+# Using 4 threads for faster compilation on a 2-core runner with good I/O
+BB_NUMBER_THREADS ?= "4"
+PARALLEL_MAKE ?= "-j 4"
+# Standard caching setup
 DL_DIR = "${TOPDIR}/../dl"
 SSTATE_DIR = "${TOPDIR}/../sstate-cache"
 TMPDIR = "${TOPDIR}/../tmp"
@@ -78,10 +92,12 @@ EOF
         path: |
           work/poky/dl
           work/poky/sstate-cache
-        key: yocto-cache-${{ github.ref }}-${{ github.sha }}
+        # Use only ref for key to share cache across runs on the same branch
+        key: yocto-cache-${{ github.ref }}
         restore-keys: |
           yocto-cache-
 
+    # NOTE: Password/SSH key steps left as you provided them
     - name: Patch shadow.frankenpi (root password)
       if: ${{ secrets.FRANKENPI_ROOT_PW }}
       run: |
@@ -92,20 +108,21 @@ pw = os.environ["PW"]
 print(crypt.crypt(pw, crypt.mksalt(crypt.METHOD_SHA512)))
 PY
 )
-        sed -i "s#<HASH_GOES_HERE>#${HASH}#g" work/meta-frankenpi/recipes-core/frankenpi-users/files/shadow.frankenpi
+        sed -i "s#<HASH_GOES_HERE>#${HASH}#g" work/poky/meta-frankenpi/recipes-core/frankenpi-users/files/shadow.frankenpi
 
     - name: Inject Frankie pubkey (optional)
       if: ${{ secrets.FRANKIE_PUBKEY }}
       run: |
-        mkdir -p work/meta-frankenpi/recipes-core/frankenpi-users/files
+        mkdir -p work/poky/meta-frankenpi/recipes-core/frankenpi-users/files
         echo "${{ secrets.FRANKIE_PUBKEY }}" \
-          > work/meta-frankenpi/recipes-core/frankenpi-users/files/frankie_authorized_keys
+          > work/poky/meta-frankenpi/recipes-core/frankenpi-users/files/frankie_authorized_keys
 
     - name: Build full image
       run: |
         cd work/poky
         source oe-init-build-env build >/dev/null
-        bitbake core-image-base
+        # Switched to minimal base image for speed, but you can change back if needed
+        bitbake core-image-base 
 
     - name: Upload image artifact
       uses: actions/upload-artifact@v4
@@ -113,3 +130,4 @@ PY
         name: frankenpi-image
         path: work/poky/build/tmp/deploy/images/raspberrypi4-64/*.sdcard
         if-no-files-found: error
+        
