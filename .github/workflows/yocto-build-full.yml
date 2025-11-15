@@ -1,0 +1,115 @@
+name: Yocto Build (Frankenpi Full)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      MACHINE: "raspberrypi4-64"
+      IMAGE_NAME: "core-image-base"
+      BB_NUMBER_THREADS: "2"
+      PARALLEL_MAKE: "-j 2"
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install host packages
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          git python3 python3-pip gawk wget diffstat unzip texinfo \
+          build-essential chrpath socat cpio python3-pexpect xz-utils \
+          debianutils iputils-ping libsdl1.2-dev xterm
+
+    - name: Prepare workspace
+      run: |
+        mkdir -p work
+        echo "WORKDIR=$GITHUB_WORKSPACE/work" > $GITHUB_WORKSPACE/.fr_env
+
+    - name: Clone poky and layers
+      run: |
+        cd work
+        git clone --depth 1 https://git.yoctoproject.org/git/poky poky
+        git clone --depth 1 https://github.com/agherzan/meta-raspberrypi.git poky/meta-raspberrypi
+        git clone --depth 1 https://github.com/openembedded/meta-openembedded.git poky/meta-openembedded
+
+    - name: Copy meta-frankenpi layer
+      run: |
+        cd work
+        cp -a $GITHUB_WORKSPACE/meta-frankenpi .
+
+    - name: Initialize build environment
+      run: |
+        cd work/poky
+        source oe-init-build-env build
+
+    - name: Add Yocto layers
+      run: |
+        cd work/poky/build
+        bitbake-layers add-layer ../meta-openembedded/meta-oe
+        bitbake-layers add-layer ../meta-raspberrypi
+        bitbake-layers add-layer ../meta-frankenpi
+
+    - name: Create local.conf
+      run: |
+        cd work/poky/build
+        cat > conf/local.conf <<'EOF'
+MACHINE ?= "raspberrypi4-64"
+DISTRO_FEATURES_append = " wifi bluetooth"
+IMAGE_INSTALL_append = " openssh sudo"
+IMAGE_FSTYPES = "sdcard"
+BB_NUMBER_THREADS ?= "2"
+PARALLEL_MAKE ?= "-j 2"
+DL_DIR = "${TOPDIR}/../dl"
+SSTATE_DIR = "${TOPDIR}/../sstate-cache"
+TMPDIR = "${TOPDIR}/../tmp"
+EOF
+
+    - name: Cache downloads + sstate (restore)
+      uses: actions/cache@v4
+      with:
+        path: |
+          work/poky/dl
+          work/poky/sstate-cache
+        key: yocto-cache-${{ github.ref }}-${{ github.sha }}
+        restore-keys: |
+          yocto-cache-
+
+    - name: Patch shadow.frankenpi (root password)
+      if: ${{ secrets.FRANKENPI_ROOT_PW }}
+      run: |
+        PW="${{ secrets.FRANKENPI_ROOT_PW }}"
+        HASH=$(python3 - <<PY
+import crypt, os
+pw = os.environ["PW"]
+print(crypt.crypt(pw, crypt.mksalt(crypt.METHOD_SHA512)))
+PY
+)
+        sed -i "s#<HASH_GOES_HERE>#${HASH}#g" work/meta-frankenpi/recipes-core/frankenpi-users/files/shadow.frankenpi
+
+    - name: Inject Frankie pubkey (optional)
+      if: ${{ secrets.FRANKIE_PUBKEY }}
+      run: |
+        mkdir -p work/meta-frankenpi/recipes-core/frankenpi-users/files
+        echo "${{ secrets.FRANKIE_PUBKEY }}" \
+          > work/meta-frankenpi/recipes-core/frankenpi-users/files/frankie_authorized_keys
+
+    - name: Build full image
+      run: |
+        cd work/poky
+        source oe-init-build-env build >/dev/null
+        bitbake core-image-base
+
+    - name: Upload image artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: frankenpi-image
+        path: work/poky/build/tmp/deploy/images/raspberrypi4-64/*.sdcard
+        if-no-files-found: error
